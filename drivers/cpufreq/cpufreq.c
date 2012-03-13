@@ -1924,6 +1924,9 @@ static int __init cpufreq_core_init(void)
 {
 	int cpu;
 
+	if (cpufreq_disabled())
+		return -ENODEV;
+
 	for_each_possible_cpu(cpu) {
 		per_cpu(cpufreq_policy_cpu, cpu) = -1;
 		init_rwsem(&per_cpu(cpu_policy_rwsem, cpu));
