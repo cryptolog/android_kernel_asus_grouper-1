@@ -457,6 +457,7 @@ static int __cpuinit cpu_online_notify(struct notifier_block *nfb,
 
 			mutex_unlock(tegra_cpu_lock);
 		}
+		wake_up_interruptible(&wait_cpu);
 		break;
 	case CPU_ONLINE:
 	case CPU_ONLINE_FROZEN:
@@ -470,6 +471,7 @@ static int __cpuinit cpu_online_notify(struct notifier_block *nfb,
 
 			mutex_unlock(tegra_cpu_lock);
 		}
+		wake_up_interruptible(&wait_cpu);
 		break;
 	}
 
