@@ -66,6 +66,7 @@ enum {
 
 	/* pool flags */
 	POOL_MANAGE_WORKERS	= 1 << 0,	/* need to manage workers */
+	POOL_MANAGING_WORKERS   = 1 << 1,       /* managing workers */
 
 	/* worker flags */
 	WORKER_STARTED		= 1 << 0,	/* started */
@@ -139,7 +140,6 @@ struct worker {
 	};
 
 	struct work_struct	*current_work;	/* L: work being processed */
-	work_func_t		current_func;	/* L: current_work's fn */
 	struct cpu_workqueue_struct *current_cwq; /* L: current_work's cwq */
 	struct list_head	scheduled;	/* L: scheduled works */
 	struct task_struct	*task;		/* I: worker task */
@@ -164,7 +164,7 @@ struct worker_pool {
 
 	struct list_head	idle_list;	/* X: list of idle workers */
 	struct timer_list	idle_timer;	/* L: worker idle timeout */
-	struct timer_list	mayday_timer;	/* L: SOS timer for dworkers */
+	struct timer_list	mayday_timer;	/* L: SOS timer for workers */
 
 	struct mutex		manager_mutex;	/* mutex manager should hold */
 	struct ida		worker_ida;	/* L: for worker IDs */
@@ -180,7 +180,7 @@ struct global_cwq {
 	unsigned int		cpu;		/* I: the associated cpu */
 	unsigned int		flags;		/* L: GCWQ_* flags */
 
-	/* workers are chained either in busy_head or pool idle_list */
+	/* workers are chained either in busy_hash or pool idle_list */
 	struct hlist_head	busy_hash[BUSY_WORKER_HASH_SIZE];
 						/* L: hash of busy workers */
 
@@ -498,14 +498,12 @@ static struct global_cwq *get_gcwq(unsigned int cpu)
 static atomic_t *get_pool_nr_running(struct worker_pool *pool)
 {
 	int cpu = pool->gcwq->cpu;
-	atomic_t (*nr_running)[NR_WORKER_POOLS];
+	int idx = worker_pool_pri(pool);
 
 	if (cpu != WORK_CPU_UNBOUND)
-		nr_running = &per_cpu(pool_nr_running, cpu);
+		return &per_cpu(pool_nr_running, cpu)[idx];
 	else
-		nr_running = &unbound_pool_nr_running;
-
-	return nr_running[worker_pool_pri(pool)];
+		return &unbound_pool_nr_running[idx];
 }
 
 static struct cpu_workqueue_struct *get_cwq(unsigned int cpu,
@@ -655,7 +653,7 @@ static bool need_to_manage_workers(struct worker_pool *pool)
 /* Do we have too many workers and should some go away? */
 static bool too_many_workers(struct worker_pool *pool)
 {
-	bool managing = mutex_is_locked(&pool->manager_mutex);
+	bool managing = pool->flags & POOL_MANAGING_WORKERS;
 	int nr_idle = pool->nr_idle + managing; /* manager is considered idle */
 	int nr_busy = pool->nr_workers - nr_idle;
 
@@ -876,8 +874,7 @@ static struct worker *__find_worker_executing_work(struct global_cwq *gcwq,
 	struct hlist_node *tmp;
 
 	hlist_for_each_entry(worker, tmp, bwh, hentry)
-		if (worker->current_work == work &&
-		    worker->current_func == work->func)
+		if (worker->current_work == work)
 			return worker;
 	return NULL;
 }
@@ -887,27 +884,9 @@ static struct worker *__find_worker_executing_work(struct global_cwq *gcwq,
  * @gcwq: gcwq of interest
  * @work: work to find worker for
  *
- * Find a worker which is executing @work on @gcwq by searching
- * @gcwq->busy_hash which is keyed by the address of @work.  For a worker
- * to match, its current execution should match the address of @work and
- * its work function.  This is to avoid unwanted dependency between
- * unrelated work executions through a work item being recycled while still
- * being executed.
- *
- * This is a bit tricky.  A work item may be freed once its execution
- * starts and nothing prevents the freed area from being recycled for
- * another work item.  If the same work item address ends up being reused
- * before the original execution finishes, workqueue will identify the
- * recycled work item as currently executing and make it wait until the
- * current execution finishes, introducing an unwanted dependency.
- *
- * This function checks the work item address, work function and workqueue
- * to avoid false positives.  Note that this isn't complete as one may
- * construct a work function which can introduce dependency onto itself
- * through a recycled work item.  Well, if somebody wants to shoot oneself
- * in the foot that badly, there's only so much we can do, and if such
- * deadlock actually occurs, it should be easy to locate the culprit work
- * function.
+ * Find a worker which is executing @work on @gcwq.  This function is
+ * identical to __find_worker_executing_work() except that this
+ * function calculates @bwh itself.
  *
  * CONTEXT:
  * spin_lock_irq(gcwq->lock).
@@ -1052,7 +1031,10 @@ static void __queue_work(unsigned int cpu, struct workqueue_struct *wq,
 	cwq = get_cwq(gcwq->cpu, wq);
 	trace_workqueue_queue_work(cpu, cwq, work);
 
-	BUG_ON(!list_empty(&work->entry));
+	if (WARN_ON(!list_empty(&work->entry))) {
+		spin_unlock_irqrestore(&gcwq->lock, flags);
+		return;
+	}
 
 	cwq->nr_in_flight[cwq->work_color]++;
 	work_flags = work_color_to_flags(cwq->work_color);
@@ -1233,7 +1215,7 @@ static void worker_enter_idle(struct worker *worker)
 	 * nr_running, the warning may trigger spuriously.  Check iff
 	 * unbind is not in progress.
 	 */
-	 WARN_ON_ONCE(!(gcwq->flags & GCWQ_DISASSOCIATED) &&
+	WARN_ON_ONCE(!(gcwq->flags & GCWQ_DISASSOCIATED) &&
 		     pool->nr_workers == pool->nr_idle &&
 		     atomic_read(get_pool_nr_running(pool)));
 }
@@ -1345,6 +1327,15 @@ static void idle_worker_rebind(struct worker *worker)
 
 	/* we did our part, wait for rebind_workers() to finish up */
 	wait_event(gcwq->rebind_hold, !(worker->flags & WORKER_REBIND));
+
+	/*
+	 * rebind_workers() shouldn't finish until all workers passed the
+	 * above WORKER_REBIND wait.  Tell it when done.
+	 */
+	spin_lock_irq(&worker->pool->gcwq->lock);
+	if (!--worker->idle_rebind->cnt)
+		complete(&worker->idle_rebind->done);
+	spin_unlock_irq(&worker->pool->gcwq->lock);
 }
 
 /*
@@ -1358,8 +1349,16 @@ static void busy_worker_rebind_fn(struct work_struct *work)
 	struct worker *worker = container_of(work, struct worker, rebind_work);
 	struct global_cwq *gcwq = worker->pool->gcwq;
 
-	if (worker_maybe_bind_and_lock(worker))
-		worker_clr_flags(worker, WORKER_REBIND);
+	worker_maybe_bind_and_lock(worker);
+
+	/*
+	 * %WORKER_REBIND must be cleared even if the above binding failed;
+	 * otherwise, we may confuse the next CPU_UP cycle or oops / get
+	 * stuck by calling idle_worker_rebind() prematurely.  If CPU went
+	 * down again inbetween, %WORKER_UNBOUND would be set, so clearing
+	 * %WORKER_REBIND is always safe.
+	 */
+	worker_clr_flags(worker, WORKER_REBIND);
 
 	spin_unlock_irq(&gcwq->lock);
 }
@@ -1415,12 +1414,15 @@ retry:
 	/* set REBIND and kick idle ones, we'll wait for these later */
 	for_each_worker_pool(pool, gcwq) {
 		list_for_each_entry(worker, &pool->idle_list, entry) {
+			unsigned long worker_flags = worker->flags;
+
 			if (worker->flags & WORKER_REBIND)
 				continue;
 
-			/* morph UNBOUND to REBIND */
-			worker->flags &= ~WORKER_UNBOUND;
-			worker->flags |= WORKER_REBIND;
+			/* morph UNBOUND to REBIND atomically */
+			worker_flags &= ~WORKER_UNBOUND;
+			worker_flags |= WORKER_REBIND;
+			ACCESS_ONCE(worker->flags) = worker_flags;
 
 			idle_rebind.cnt++;
 			worker->idle_rebind = &idle_rebind;
@@ -1438,25 +1440,15 @@ retry:
 		goto retry;
 	}
 
-	/*
-	 * All idle workers are rebound and waiting for %WORKER_REBIND to
-	 * be cleared inside idle_worker_rebind().  Clear and release.
-	 * Clearing %WORKER_REBIND from this foreign context is safe
-	 * because these workers are still guaranteed to be idle.
-	 */
-	for_each_worker_pool(pool, gcwq)
-		list_for_each_entry(worker, &pool->idle_list, entry)
-			worker->flags &= ~WORKER_REBIND;
-
-	wake_up_all(&gcwq->rebind_hold);
-
-	/* rebind busy workers */
+	/* all idle workers are rebound, rebind busy workers */
 	for_each_busy_worker(worker, i, pos, gcwq) {
 		struct work_struct *rebind_work = &worker->rebind_work;
+		unsigned long worker_flags = worker->flags;
 
-		/* morph UNBOUND to REBIND */
-		worker->flags &= ~WORKER_UNBOUND;
-		worker->flags |= WORKER_REBIND;
+		/* morph UNBOUND to REBIND atomically */
+		worker_flags &= ~WORKER_UNBOUND;
+		worker_flags |= WORKER_REBIND;
+		ACCESS_ONCE(worker->flags) = worker_flags;
 
 		if (test_and_set_bit(WORK_STRUCT_PENDING_BIT,
 				     work_data_bits(rebind_work)))
@@ -1467,6 +1459,34 @@ retry:
 		insert_work(get_cwq(gcwq->cpu, system_wq), rebind_work,
 			    worker->scheduled.next,
 			    work_color_to_flags(WORK_NO_COLOR));
+	}
+
+	/*
+	 * All idle workers are rebound and waiting for %WORKER_REBIND to
+	 * be cleared inside idle_worker_rebind().  Clear and release.
+	 * Clearing %WORKER_REBIND from this foreign context is safe
+	 * because these workers are still guaranteed to be idle.
+	 *
+	 * We need to make sure all idle workers passed WORKER_REBIND wait
+	 * in idle_worker_rebind() before returning; otherwise, workers can
+	 * get stuck at the wait if hotplug cycle repeats.
+	 */
+	idle_rebind.cnt = 1;
+	INIT_COMPLETION(idle_rebind.done);
+
+	for_each_worker_pool(pool, gcwq) {
+		list_for_each_entry(worker, &pool->idle_list, entry) {
+			worker->flags &= ~WORKER_REBIND;
+			idle_rebind.cnt++;
+		}
+	}
+
+	wake_up_all(&gcwq->rebind_hold);
+
+	if (--idle_rebind.cnt) {
+		spin_unlock_irq(&gcwq->lock);
+		wait_for_completion(&idle_rebind.done);
+		spin_lock_irq(&gcwq->lock);
 	}
 }
 
@@ -1813,8 +1833,44 @@ static bool manage_workers(struct worker *worker)
 	struct worker_pool *pool = worker->pool;
 	bool ret = false;
 
-	if (!mutex_trylock(&pool->manager_mutex))
+	if (pool->flags & POOL_MANAGING_WORKERS)
 		return ret;
+
+	pool->flags |= POOL_MANAGING_WORKERS;
+
+	/*
+	 * To simplify both worker management and CPU hotplug, hold off
+	 * management while hotplug is in progress.  CPU hotplug path can't
+	 * grab %POOL_MANAGING_WORKERS to achieve this because that can
+	 * lead to idle worker depletion (all become busy thinking someone
+	 * else is managing) which in turn can result in deadlock under
+	 * extreme circumstances.  Use @pool->manager_mutex to synchronize
+	 * manager against CPU hotplug.
+	 *
+	 * manager_mutex would always be free unless CPU hotplug is in
+	 * progress.  trylock first without dropping @gcwq->lock.
+	 */
+	if (unlikely(!mutex_trylock(&pool->manager_mutex))) {
+		spin_unlock_irq(&pool->gcwq->lock);
+		mutex_lock(&pool->manager_mutex);
+		/*
+		 * CPU hotplug could have happened while we were waiting
+		 * for manager_mutex.  Hotplug itself can't handle us
+		 * because manager isn't either on idle or busy list, and
+		 * @gcwq's state and ours could have deviated.
+		 *
+		 * As hotplug is now excluded via manager_mutex, we can
+		 * simply try to bind.  It will succeed or fail depending
+		 * on @gcwq's current state.  Try it and adjust
+		 * %WORKER_UNBOUND accordingly.
+		 */
+		if (worker_maybe_bind_and_lock(worker))
+			worker->flags &= ~WORKER_UNBOUND;
+		else
+			worker->flags |= WORKER_UNBOUND;
+
+		ret = true;
+	}
 
 	pool->flags &= ~POOL_MANAGE_WORKERS;
 
@@ -1825,6 +1881,7 @@ static bool manage_workers(struct worker *worker)
 	ret |= maybe_destroy_workers(pool);
 	ret |= maybe_create_worker(pool);
 
+	pool->flags &= ~POOL_MANAGING_WORKERS;
 	mutex_unlock(&pool->manager_mutex);
 	return ret;
 }
@@ -1960,6 +2017,7 @@ __acquires(&gcwq->lock)
 	struct global_cwq *gcwq = pool->gcwq;
 	struct hlist_head *bwh = busy_worker_head(gcwq, work);
 	bool cpu_intensive = cwq->wq->flags & WQ_CPU_INTENSIVE;
+	work_func_t f = work->func;
 	int work_color;
 	struct worker *collision;
 #ifdef CONFIG_LOCKDEP
@@ -1970,7 +2028,9 @@ __acquires(&gcwq->lock)
 	 * lock freed" warnings as well as problems when looking into
 	 * work->lockdep_map, make a copy and use that here.
 	 */
-	struct lockdep_map lockdep_map = work->lockdep_map;
+	struct lockdep_map lockdep_map;
+
+	lockdep_copy_map(&lockdep_map, &work->lockdep_map);
 #endif
 	/*
 	 * Ensure we're on the correct CPU.  DISASSOCIATED test is
@@ -1997,7 +2057,6 @@ __acquires(&gcwq->lock)
 	debug_work_deactivate(work);
 	hlist_add_head(&worker->hentry, bwh);
 	worker->current_work = work;
-	worker->current_func = work->func;
 	worker->current_cwq = cwq;
 	work_color = get_work_color(work);
 
@@ -2027,7 +2086,7 @@ __acquires(&gcwq->lock)
 	lock_map_acquire_read(&cwq->wq->lockdep_map);
 	lock_map_acquire(&lockdep_map);
 	trace_workqueue_execute_start(work);
-	worker->current_func(work);
+	f(work);
 	/*
 	 * While we must be careful to not use "work" after this, the trace
 	 * point will only record its address.
@@ -2037,10 +2096,11 @@ __acquires(&gcwq->lock)
 	lock_map_release(&cwq->wq->lockdep_map);
 
 	if (unlikely(in_atomic() || lockdep_depth(current) > 0)) {
-		pr_err("BUG: workqueue leaked lock or atomic: %s/0x%08x/%d\n"
-		       "     last function: %pf\n",
-		       current->comm, preempt_count(), task_pid_nr(current),
-		       worker->current_func);
+		printk(KERN_ERR "BUG: workqueue leaked lock or atomic: "
+		       "%s/0x%08x/%d\n",
+		       current->comm, preempt_count(), task_pid_nr(current));
+		printk(KERN_ERR "    last function: ");
+		print_symbol("%s\n", (unsigned long)f);
 		debug_show_held_locks(current);
 		dump_stack();
 	}
@@ -2054,7 +2114,6 @@ __acquires(&gcwq->lock)
 	/* we're done with it, release */
 	hlist_del_init(&worker->hentry);
 	worker->current_work = NULL;
-	worker->current_func = NULL;
 	worker->current_cwq = NULL;
 	cwq_dec_nr_in_flight(cwq, work_color, false);
 }
@@ -2682,6 +2741,9 @@ already_gone:
 bool flush_work(struct work_struct *work)
 {
 	struct wq_barrier barr;
+
+	lock_map_acquire(&work->lockdep_map);
+	lock_map_release(&work->lockdep_map);
 
 	if (start_flush_work(work, &barr, true)) {
 		wait_for_completion(&barr.done);
