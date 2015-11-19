@@ -817,26 +817,22 @@ void touch_callback(unsigned cable_status){
 static int elan_ktf3k_ts_recv_data(struct i2c_client *client, uint8_t *buf, int size)
 {
 
-	int retry = 0, bytes_to_recv = size;
+	int rc, bytes_to_recv = size;
 
 	if (buf == NULL)
 		return -EINVAL;
 
 	memset(buf, 0, bytes_to_recv);
+	rc = i2c_master_recv(client, buf, bytes_to_recv);
 
-	for (retry = 0; retry <= ELAN_I2C_RETRY; retry++) {
-		if (i2c_master_recv(client, buf, bytes_to_recv) == bytes_to_recv)
-			return bytes_to_recv;
-		if (retry == ELAN_I2C_RETRY) {
-			dev_err(&client->dev,
-				"[elan] %s: i2c_master_recv error?! \n", __func__);
-			(void) i2c_master_recv(client, buf, bytes_to_recv);
-			return -EINVAL;
-		} else
-			msleep(10);
+	if (rc != bytes_to_recv) {
+		dev_err(&client->dev,
+			"[elan] %s: i2c_master_recv error?! \n", __func__);
+		rc = i2c_master_recv(client, buf, bytes_to_recv);
+		return -EINVAL;
 	}
 
-	return -EINVAL;
+	return rc;
 }
 
 static void elan_ktf3k_ts_report_data(struct i2c_client *client, uint8_t *buf)
