@@ -288,9 +288,8 @@ config AIO_OPTIMIZATION
 	  An experimental AIO FS kernel optimization
 
 config ASYNC_FSYNC
-	bool
-	string "asynchronous fsync"
-	default y
+	bool "asynchronous fsync"
+	default n
 
 config DYNAMIC_FSYNC
 	bool "dynamic file sync control"
