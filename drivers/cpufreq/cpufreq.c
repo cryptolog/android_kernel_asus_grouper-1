@@ -2026,9 +2026,6 @@ int cpufreq_register_driver(struct cpufreq_driver *driver_data)
 	if (cpufreq_disabled())
 		return -ENODEV;
 
-	if (cpufreq_disabled())
-		return -ENODEV;
-
 	if (!driver_data || !driver_data->verify || !driver_data->init ||
 	    ((!driver_data->setpolicy) && (!driver_data->target)))
 		return -EINVAL;
@@ -2155,9 +2152,6 @@ static int __init cpufreq_core_init(void)
 {
 	int cpu;
 	int rc;
-
-	if (cpufreq_disabled())
-		return -ENODEV;
 
 	if (cpufreq_disabled())
 		return -ENODEV;
