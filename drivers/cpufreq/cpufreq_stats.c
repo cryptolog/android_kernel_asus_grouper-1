@@ -278,7 +278,7 @@ static void cpufreq_stats_free_sysfs(unsigned int cpu)
 	struct cpufreq_policy *policy = cpufreq_cpu_get(cpu);
 	if (policy && (cpumask_weight(policy->cpus) == 1)) {
 		pr_debug("%s: Free sysfs stat\n", __func__);
-		sysfs_remove_group(policy->kobj, &stats_attr_group);
+		sysfs_remove_group(&policy->kobj, &stats_attr_group);
 	}
 	if (policy)
 		cpufreq_cpu_put(policy);
@@ -327,7 +327,7 @@ static int cpufreq_stats_create_table(struct cpufreq_policy *policy,
 		goto error_get_fail;
 	}
 
-	ret = sysfs_create_group(data->kobj, &stats_attr_group);
+	ret = sysfs_create_group(&data->kobj, &stats_attr_group);
 	if (ret)
 		goto error_out;
 
