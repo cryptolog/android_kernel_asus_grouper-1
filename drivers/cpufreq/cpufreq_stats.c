@@ -3,6 +3,7 @@
  *
  *  Copyright (C) 2003-2004 Venkatesh Pallipadi <venkatesh.pallipadi@intel.com>.
  *  (C) 2004 Zou Nan hai <nanhai.zou@intel.com>.
+ *  Copyright (c) 2012-2013, NVIDIA CORPORATION. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -263,10 +264,8 @@ static void cpufreq_stats_free_table(unsigned int cpu)
 	spin_unlock(&cpufreq_stats_lock);
 
 	if (stat) {
-		pr_debug("%s: Free stat table\n", __func__);
 		kfree(stat->time_in_state);
 		kfree(stat);
-		per_cpu(cpufreq_stats_table, cpu) = NULL;
 	}
 }
 
@@ -276,10 +275,8 @@ static void cpufreq_stats_free_table(unsigned int cpu)
 static void cpufreq_stats_free_sysfs(unsigned int cpu)
 {
 	struct cpufreq_policy *policy = cpufreq_cpu_get(cpu);
-	if (policy && (cpumask_weight(policy->cpus) == 1)) {
-		pr_debug("%s: Free sysfs stat\n", __func__);
-		sysfs_remove_group(&policy->kobj, &stats_attr_group);
-	}
+	if (policy && policy->cpu == cpu)
+		sysfs_remove_group(policy->kobj, &stats_attr_group);
 	if (policy)
 		cpufreq_cpu_put(policy);
 }
@@ -327,7 +324,7 @@ static int cpufreq_stats_create_table(struct cpufreq_policy *policy,
 		goto error_get_fail;
 	}
 
-	ret = sysfs_create_group(&data->kobj, &stats_attr_group);
+	ret = sysfs_create_group(data->kobj, &stats_attr_group);
 	if (ret)
 		goto error_out;
 
@@ -488,19 +485,6 @@ static void cpufreq_allstats_create(unsigned int cpu)
 	spin_unlock(&cpufreq_stats_lock);
 }
 
-static void cpufreq_stats_update_policy_cpu(struct cpufreq_policy *policy)
-{
-	struct cpufreq_stats *stat = per_cpu(cpufreq_stats_table,
-			policy->last_cpu);
-
-	pr_debug("Updating stats_table for new_cpu %u from last_cpu %u\n",
-			policy->cpu, policy->last_cpu);
-	per_cpu(cpufreq_stats_table, policy->cpu) = per_cpu(cpufreq_stats_table,
-			policy->last_cpu);
-	per_cpu(cpufreq_stats_table, policy->last_cpu) = NULL;
-	stat->cpu = policy->cpu;
-}
-
 static int cpufreq_stat_notifier_policy(struct notifier_block *nb,
 		unsigned long val, void *data)
 {
@@ -508,12 +492,6 @@ static int cpufreq_stat_notifier_policy(struct notifier_block *nb,
 	struct cpufreq_policy *policy = data;
 	struct cpufreq_frequency_table *table;
 	unsigned int cpu = policy->cpu;
-
-	if (val == CPUFREQ_UPDATE_POLICY_CPU) {
-		cpufreq_stats_update_policy_cpu(policy);
-		return 0;
-	}
-
 	if (val != CPUFREQ_NOTIFY)
 		return 0;
 	table = cpufreq_frequency_get_table(cpu);
