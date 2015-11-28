@@ -1244,10 +1244,8 @@ copy_answers:
 	wake_up(&(comm->wait_queue));
 
 #ifdef CONFIG_FREEZER
-	if (try_to_freeze()) {
-		recalc_sigpending();
+	if (try_to_freeze())
 		goto copy_answers;
-	}
 #endif
 
 #ifndef CONFIG_PREEMPT
