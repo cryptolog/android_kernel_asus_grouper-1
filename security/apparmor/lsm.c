@@ -497,7 +497,7 @@ static int apparmor_file_mmap(struct file *file, unsigned long reqprot,
 	int rc = 0;
 
 	/* do DAC check */
-	rc = cap_mmap_addr(addr);
+	rc = cap_file_mmap(file, reqprot, prot, flags, addr, addr_only);
 	if (rc || addr_only)
 		return rc;
 
