@@ -148,7 +148,7 @@ static irqreturn_t tegra_mc_error_isr(int irq, void *data)
 
 	stat = readl(mc + MC_INT_STATUS) & MC_INT_EN_MASK;
 
-	__cancel_delayed_work(&unthrottle_prints_work);
+	cancel_delayed_work(&unthrottle_prints_work);
 
 #ifdef MC_DUAL_CHANNEL
 	/*
