@@ -4542,4 +4542,3 @@ size_t ksize(const void *objp)
 	return virt_to_cache(objp)->object_size;
 }
 EXPORT_SYMBOL(ksize);
-
