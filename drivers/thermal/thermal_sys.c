@@ -1679,14 +1679,8 @@ struct thermal_zone_device *thermal_zone_device_register(const char *type,
 
 	if (tz->tzp)
 		tz->governor = __find_governor(tz->tzp->governor_name);
-
-	if (!tz->governor) {
+	else
 		tz->governor = __find_governor(DEFAULT_THERMAL_GOVERNOR);
-		if (!tz->governor) {
-			mutex_unlock(&thermal_governor_lock);
-			goto unregister;
-		}
-	}
 
 	mutex_unlock(&thermal_governor_lock);
 
