@@ -2465,7 +2465,7 @@ static irqreturn_t tegra_udc_irq(int irq, void *_udc)
 				EP_SETUP_STATUS_EP0) {
 			/* Setup packet received, we are connected to host
 			 * and not to charger. Cancel any delayed work */
-			__cancel_delayed_work(&udc->non_std_charger_work);
+			cancel_delayed_work(&udc->non_std_charger_work);
 			tripwire_handler(udc, 0,
 					(u8 *) (&udc->local_setup_buff));
 			setup_received_irq(udc, &udc->local_setup_buff);
