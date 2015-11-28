@@ -831,7 +831,14 @@ next_elt:
 		nht = rcu_dereference_protected(tbl->nht,
 						lockdep_is_held(&tbl->lock));
 	}
-
+	/* Cycle through all hash buckets every base_reachable_time/2 ticks.
+	 * ARP entry timeouts range from 1/2 base_reachable_time to 3/2
+	 * base_reachable_time.
+	 */
+	mod_delayed_work(&tbl->gc_work,
+			      tbl->parms.base_reachable_time >> 1);
+	write_unlock_bh(&tbl->lock);
+}
 
 static __inline__ int neigh_max_probes(struct neighbour *n)
 {
